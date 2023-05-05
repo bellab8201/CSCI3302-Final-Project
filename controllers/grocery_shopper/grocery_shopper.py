@@ -141,7 +141,7 @@ map = np.zeros(shape=[360,192]) # room is 30x16 -> 30*12=360, 16*12=192
 # SELECT MODE HERE:
 # mode = 'mapping'
 mode = 'planner'
-# mode = 'autonomous'
+# mode = 'shopping'
 
 # begin planning block ---------------------------------------------------------------------------
 if mode == 'planner':
