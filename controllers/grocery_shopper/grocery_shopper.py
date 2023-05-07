@@ -1,4 +1,4 @@
-"""grocery controller."""
+"""grocery_shopper.py"""
 
 from controller import Robot, Motor, Camera, CameraRecognitionObject, RangeFinder, Lidar, Keyboard
 import math
@@ -99,6 +99,7 @@ lidar_offsets = np.linspace(-LIDAR_ANGLE_RANGE/2., +LIDAR_ANGLE_RANGE/2., LIDAR_
 lidar_offsets = lidar_offsets[83:len(lidar_offsets)-83] # Only keep lidar readings not blocked by robot chassis
 
 map = None
+mode = None
 
 # Helper Functions --------------------------------------------------------------------
 
@@ -114,6 +115,14 @@ def stop_and_wait(duration):
     robot_parts["wheel_left_joint"].setVelocity(0)
     robot_parts["wheel_right_joint"].setVelocity(0)
     sleep(duration)
+    
+def start_routine():
+    robot_parts["wheel_left_joint"].setVelocity(-MAX_SPEED/3)
+    robot_parts["wheel_right_joint"].setVelocity(-MAX_SPEED/3)
+    sleep(2)
+    robot_parts["wheel_left_joint"].setVelocity(0)
+    robot_parts["wheel_right_joint"].setVelocity(0)
+    sleep(2)
     
 def rand_explore():
     # back up, spin randomly and try again
@@ -170,20 +179,13 @@ aisle_two_items = []
 aisle_three_items = []
 aisle_four_items = []
 
-# planning_waypoints = [[-6,-5.7], [12.5,-5.7], [12.5,-2], [-6,-2], [-6,2], [12.5,2], [12.5,5.7], [-6,5.7]]
-# PLANNING_WAYPOINTS_SIZE = 8 # used to keep track of state
-
 # final path used in planning stage
 complete_path = []
 
-# state init (to index into waypoint array)
-current_goal = 0
-next_goal = current_goal + 1 # for eta
-completed = False # flag to check sim completion
+# ------------------------ SELECT CONTROLLER MODE HERE! ---------------------------
 
-# SELECT CONTROLLER MODE HERE!
-# mode = 'mapping'
-mode = 'planner'
+mode = 'mapping'
+# mode = 'planner'
 # mode = 'shopping'
 
 # begin planning block ---------------------------------------------------------------------------
@@ -261,7 +263,7 @@ if mode == 'planner':
     # plt.show()
     
     # Compute an approximation of the “configuration space”
-    test = np.ones((12, 12))
+    test = np.ones((27, 27)) # upping the size of this creates more padding, useful for Tiago
     c_space = convolve2d(map, test, mode="same")
     c_space[c_space > 1] = 1
     # plt.imshow(c_space)
@@ -300,11 +302,33 @@ if mode == 'planner':
     print("===> Path Planning Phase Exited.")   
 # end planning block ---------------------------------------------------------------------------
 
+# begin pre-shopping block ---------------------------------------------------------------------------
+if mode == 'shopping':
+    # waypoints for IK, like labs 3 and 5
+    waypoints = np.load("path.npy")
+    
+    # stop to grab each block (provides comparison to waypoints[current_goal])
+    shopping_points_tuple = []
+    shopping_points_triple = np.load("cube_pos_valid.npy")
+    for point in shopping_points_triple:
+        shopping_points_tuple.append([point[0], point[1]])
+    
+    # state init for shopping module (to index into waypoint array)
+    current_goal = 0
+    next_goal = current_goal + 1 # for eta
+    
+    starting = True # perform starting adjustments
+    completed = False # flag to check sim completion
+    
+    WAYPOINTS_SIZE = len(waypoints)
+# end pre-shopping block ---------------------------------------------------------------------------
+
 # Main Loop ---------------------------------------------------------------------------------------
 while robot.step(timestep) != -1:
 
     # prevents controller from crashing in 'planner' mode
-    if mode == 'planner':
+    # or when mode is unset
+    if mode == 'planner' or mode == None:
         robot_parts["wheel_left_joint"].setVelocity(0)
         robot_parts["wheel_right_joint"].setVelocity(0)
         continue
@@ -319,20 +343,23 @@ while robot.step(timestep) != -1:
     
     # begin shopping block ---------------------------------------------------------------------------
     if mode == 'shopping':
+        if starting:
+            start_routine()
+            starting = False
         if completed: # has finished shopping -> keep updating time but robot will be stopped forever
             continue
         
         #Calculate error with respect to current and goal position
-        rho = math.sqrt(((pose_x - planning_waypoints[current_goal][0])**2) + ((pose_y - planning_waypoints[current_goal][1])**2))
-        alpha = math.atan2(planning_waypoints[current_goal][1] - pose_y, planning_waypoints[current_goal][0] - pose_x) - pose_theta
-        eta = math.atan2(planning_waypoints[next_goal][1] - pose_y, planning_waypoints[next_goal][0] - pose_x) - pose_theta # waypoint heading should have a heading that points to next waypoint
+        rho = math.sqrt(((pose_x - waypoints[current_goal][0])**2) + ((pose_y - waypoints[current_goal][1])**2))
+        alpha = math.atan2(waypoints[current_goal][1] - pose_y, waypoints[current_goal][0] - pose_x) - pose_theta
+        eta = math.atan2(waypoints[next_goal][1] - pose_y, waypoints[next_goal][0] - pose_x) - pose_theta # waypoint heading should have a heading that points to next waypoint
         
         if alpha < -3.1415: alpha += 6.283 #error containing (angular error is circular)
         if eta < -3.1415: eta += 6.283
         
         #Feedback Controller (coefficients from trial/error)
-        dX = 2*rho
-        dTheta = 10*alpha
+        dX = rho
+        dTheta = 5*alpha
         
         #Inverse Kinematics Equations (vL and vR as a function dX and dTheta)
         #Note that vL and vR in code is phi_l and phi_r on the slides/lecture
@@ -354,15 +381,22 @@ while robot.step(timestep) != -1:
 
         #Stopping (goal reached) criteria -> waypoint progression
         if rho <= 1 and eta <= 0.75: # was 0.05 and 0.524 in lab 3, but Tiago is clumsier and less precise
-            stop_and_wait(2)
+            # --------------------------
+            # a routine that stops the robot to shop, including performing the arm manipulation
+            # required to move a block from the shelf into the basket would go here. Ideally,
+            # a comparison would be made to determine if our current waypoint matches one of the
+            # valid block positions found in mapping.
+            # --------------------------
             current_goal += 1
             next_goal += 1
-            if next_goal >= PLANNING_WAYPOINTS_SIZE: # to not go out of bounds
+            if next_goal >= WAYPOINTS_SIZE: # to not go out of bounds
                 next_goal = current_goal
-            if current_goal >= PLANNING_WAYPOINTS_SIZE: # reached last checkpoint
+            if current_goal >= WAYPOINTS_SIZE: # reached last checkpoint
                 completed = True
-                robot_parts[MOTOR_LEFT].setVelocity(0)
-                robot_parts[MOTOR_RIGHT].setVelocity(0)
+                robot_parts["wheel_left_joint"].setVelocity(0)
+                robot_parts["wheel_right_joint"].setVelocity(0)
+                print("===> Finished Shopping")
+                print("===> Boulder Dynamics' Grocery Shopper Has Exited.")
                 continue
     # end shopping block ---------------------------------------------------------------------------
     
@@ -475,6 +509,10 @@ while robot.step(timestep) != -1:
     # end mapping block ------------------------------------------------------------------------------------
 
     # set wheel velocities
+    if mode == 'shopping': # reduces wobble significantly, helps IK
+        vL = vL*0.6
+        vR = vR*0.6
+        
     robot_parts["wheel_left_joint"].setVelocity(vL)
     robot_parts["wheel_right_joint"].setVelocity(vR)
     
