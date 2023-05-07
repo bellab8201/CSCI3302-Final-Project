@@ -148,18 +148,32 @@ def avoid_left():
     
 def cmp(a, b): # not sure why this function was removed from Python 3
     return (a > b) - (a < b)
+    
+def sort_x(points):
+    # sorts a list of triples based on the x-value, or first index
+    points.sort(key = lambda x: x[0]) # from GeeksForGeeks, better than bubble sort
+    return points
                 
 # State/Global Vars --------------------------------------------------------------------
 
 gripper_status="closed"
 map = np.zeros(shape=[360,192]) # room is 30x16 -> 30*12=360, 16*12=192
 
+# for storing cube positions
 cube_ids = []
 cube_positions = []
 cube_pos_valid = []
 
+# ugly, but this helps organize a more efficient path
+aisle_one_items = []
+aisle_two_items = []
+aisle_three_items = []
+aisle_four_items = []
+
 # planning_waypoints = [[-6,-5.7], [12.5,-5.7], [12.5,-2], [-6,-2], [-6,2], [12.5,2], [12.5,5.7], [-6,5.7]]
 # PLANNING_WAYPOINTS_SIZE = 8 # used to keep track of state
+
+# final path used in planning stage
 complete_path = []
 
 # state init (to index into waypoint array)
@@ -355,7 +369,6 @@ while robot.step(timestep) != -1:
     # begin mapping block ---------------------------------------------------------------------------
     if mode == 'mapping':
         
-        # storing cube positions
         objects = camera.getRecognitionObjects()
         for obj in objects: # look through all recognized objects
             if obj.getColors() == [1.0, 1.0, 0.0] or obj.getColors() == [0.0, 1.0, 0.0]: # only yellow/green cubes
@@ -372,18 +385,28 @@ while robot.step(timestep) != -1:
                     # aisle thresholds determined by finding y-value of middle of each shelf
                     if obj_y > 3.9:
                         obj_y = AISLE_ONE
+                        aisle_one_items.append([obj_x, obj_y, obj_z])
+                        sort_x(aisle_one_items) # sort based on x-value (efficient pathing)
                     elif obj_y > 0 and obj_y < 3.9:
                         obj_y = AISLE_TWO
+                        aisle_two_items.append([obj_x, obj_y, obj_z])
+                        sort_x(aisle_two_items)
                     elif obj_y < 0 and obj_y > -3.8:
                         obj_y = AISLE_THREE
+                        aisle_three_items.append([obj_x, obj_y, obj_z])
+                        sort_x(aisle_three_items)
                     elif obj_y < -3.5: # for some reason that one block needs a more aggressive threshold
                         obj_y = AISLE_FOUR
+                        aisle_four_items.append([obj_x, obj_y, obj_z])
+                        sort_x(aisle_four_items)
                     else:
                         print("Invalid y-coordinate for object, could not create valid path")
-                        
-                    cube_pos_valid.append([obj_x, obj_y, obj_z]) # store valid positions for path planning
-                    print("Cube Found! Current Total: ", len(cube_pos_valid)) # stop mapping at 12 cubes (10 yellow, 2, green)
-                    # print("Cube Positions: ", cube_positions)
+                    
+                    # concatenate all aisles to form continuous path of waypoints once all cubes are found
+                    if len(cube_positions) == 12:
+                        cube_pos_valid = aisle_four_items + aisle_three_items + aisle_two_items + aisle_one_items
+                        # print("Cube Positions: ", cube_positions)
+                    print("Cube Found! Current Total: ", len(cube_positions)) # stop mapping at 12 cubes (10 yellow, 2, green)
         
         lidar_sensor_readings = lidar.getRangeImage()
         lidar_sensor_readings = lidar_sensor_readings[83:len(lidar_sensor_readings)-83]
