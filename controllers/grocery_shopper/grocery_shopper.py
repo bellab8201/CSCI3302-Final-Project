@@ -1,17 +1,18 @@
 """grocery controller."""
 
-from controller import Robot, Motor, Camera, RangeFinder, Lidar, Keyboard
+from controller import Robot, Motor, Camera, CameraRecognitionObject, RangeFinder, Lidar, Keyboard
 import math
 import random
 import numpy as np
 from matplotlib import pyplot as plt
 from scipy.signal import convolve2d # for mapping, path planning
 import heapq # for path planning
+import cv2 # for computer vision
 
-#Initialization
+# Initialization
 print("===> Initializing Boulder Dynamics' Grocery Shopper...")
 
-#Consts
+# Provided Constants
 MAX_SPEED = 7.0  # [rad/s]
 MAX_SPEED_MS = 0.633 # [m/s]
 AXLE_LENGTH = 0.4044 # m
@@ -22,8 +23,17 @@ LIDAR_ANGLE_BINS = 667
 LIDAR_SENSOR_MAX_RANGE = 5.5 # Meters
 LIDAR_ANGLE_RANGE = math.radians(240)
 
+# Defined Constants
 LID_COL_THRESH = 2
 LID_COL_THRESH_FRONT = 1.65 # want to prioritize left/right sensors to go down aisles
+
+CAM_OFFSET_Y = 0.23 # cam y-coord relative to robot
+CAM_OFFSET_Z = 1.05 # cam z-coord relative to robot
+# valid y-coords for path planning
+AISLE_ONE = 5.7
+AISLE_TWO = 2
+AISLE_THREE = -2
+AISLE_FOUR = -5.7
 
 # create the Robot instance.
 robot = Robot()
@@ -98,8 +108,14 @@ def sleep(duration):
     end_time = robot.getTime() + duration
     while robot.step(timestep) != -1 and  robot.getTime() < end_time:
         pass
+        
+def stop_and_wait(duration):
+    # cuts power to wheels for a set duration using sleep()
+    robot_parts["wheel_left_joint"].setVelocity(0)
+    robot_parts["wheel_right_joint"].setVelocity(0)
+    sleep(duration)
     
-def rand_explore_front():
+def rand_explore():
     # back up, spin randomly and try again
     # not frequently called, but helps with corners and
     # moving towards middle of map
@@ -118,48 +134,67 @@ def rand_explore_front():
         robot_parts["wheel_right_joint"].setVelocity(0.7*MAX_SPEED)
     sleep(random.random()/1.5) # spin between 0-0.5 sec
     
-def rand_explore_right():
+def avoid_right():
     # veer left briefly
     robot_parts["wheel_left_joint"].setVelocity(.5*MAX_SPEED)
     robot_parts["wheel_right_joint"].setVelocity(MAX_SPEED)
     sleep(.08)
     
-def rand_explore_left():
+def avoid_left():
     # veer right briefly
     robot_parts["wheel_left_joint"].setVelocity(MAX_SPEED)
     robot_parts["wheel_right_joint"].setVelocity(.5*MAX_SPEED)
     sleep(.08)
     
 def cmp(a, b): # not sure why this function was removed from Python 3
-    return (a > b) - (a < b)
-    
+    return (a > b) - (a < b)  
+                
 # State/Global Vars --------------------------------------------------------------------
 
 gripper_status="closed"
 map = np.zeros(shape=[360,192]) # room is 30x16 -> 30*12=360, 16*12=192
 
-# SELECT MODE HERE:
+cube_ids = []
+cube_positions = []
+cube_pos_valid = []
+
+planning_waypoints = [[-6,-5.7], [12.5,-5.7], [12.5,-2], [-6,-2], [-6,2], [12.5,2], [12.5,5.7], [-6,5.7]]
+PLANNING_WAYPOINTS_SIZE = 8 # used to keep track of state
+
+# state init (to index into waypoint array)
+current_goal = 0
+next_goal = current_goal + 1 # for eta
+completed = False # flag to check sim completion
+
+# SELECT CONTROLLER MODE HERE!
 # mode = 'mapping'
 mode = 'planner'
 # mode = 'shopping'
 
 # begin planning block ---------------------------------------------------------------------------
 if mode == 'planner':
-    # start/end in world coordinate frame
-    start_w = (-4.999,-0.088) # (Pose_X, Pose_Y) in meters
-    end_w = (8.78, -5.76) # (Pose_X, Pose_Y) in meters
+    # start/end points in world coordinate frame
+    start_w = (-5.0, 0.0) # (Pose_X, Pose_Y) in meters
+    end_w = (-12, 5) # (Pose_X, Pose_Y) in meters
     # start/end in map coordinate frame
     start = (180-int(start_w[0]*12), 96-int(start_w[1]*12)) # (x, y) in 360x192 map
     end = (180-int(end_w[0]*12), 96-int(end_w[1]*12)) # (x, y) in 360x192 map
+    # cube_locations_w = np.load("cube_pos_valid") # a list of "end points" to retrieve cubes from
     
-    # This is an A* algorithm taken from Wikipedia, although it does not consider diagonal indicies
+    # start/end points in map coordinate frame
+    # start = (180-int(start_w[0]*12), 96-int(start_w[1]*12)) # (x, y) in 360x192 map
+    # cube_locations = []
+    # for point in cube_locations_w
+        # cube_locations.append = (180-int(point[0]*12), 96-int(point[1]*12)) # (x, y) in 360x192 map
+    
+    # This is an A* algorithm adapted from Wikipedia using Euclidian instead of Manhattan Distance
     def heuristic(a, b):
         '''
         :param a: A tuple of indices representing a cell in the map
         :param b: A tuple of indices representing a cell in the map
-        :return: The Manhattan distance between a and b
+        :return: The Euclidian distance between a and b
         '''
-        return abs(a[0] - b[0]) + abs(a[1] - b[1])
+        return np.linalg.norm(np.array(a)-np.array(b))
 
     def path_planner(map, start, end):
         '''
@@ -169,8 +204,8 @@ if mode == 'planner':
         :return: A list of tuples as a path from the given start to the given end in the given maze
         '''
         
-        dir = [(0,1),(0,-1),(1,0),(-1,0)]
-        start_sq = (0, start)
+        dir = [(0,1),(0,-1),(1,0),(-1,0)] # direction matrix
+        start_sq = (0, start) # start node
         heap = [start_sq]
         cost = {start:0}
         came_from = {}
@@ -239,12 +274,12 @@ if mode == 'planner':
     plt.show()
     plt.imshow(map_with_path)
     plt.show()
-    print("===> Path Planning Stage Exited.")
+    print("===> Path Planning Phase Exited.")
 # end planning block ---------------------------------------------------------------------------
 
-# Main Loop --------------------------------------------------------------------------------
+# Main Loop ---------------------------------------------------------------------------------------
 while robot.step(timestep) != -1:
-    
+
     # prevents controller from crashing in 'planner' mode
     if mode == 'planner':
         robot_parts["wheel_left_joint"].setVelocity(0)
@@ -259,8 +294,86 @@ while robot.step(timestep) != -1:
     rad = -((math.atan2(n[1], n[0]))-1.5708)
     pose_theta = rad
     
+    # begin shopping block ---------------------------------------------------------------------------
+    if mode == 'shopping':
+        if completed: # has finished shopping -> keep updating time but robot will be stopped forever
+            continue
+        
+        #Calculate error with respect to current and goal position
+        rho = math.sqrt(((pose_x - planning_waypoints[current_goal][0])**2) + ((pose_y - planning_waypoints[current_goal][1])**2))
+        alpha = math.atan2(planning_waypoints[current_goal][1] - pose_y, planning_waypoints[current_goal][0] - pose_x) - pose_theta
+        eta = math.atan2(planning_waypoints[next_goal][1] - pose_y, planning_waypoints[next_goal][0] - pose_x) - pose_theta # waypoint heading should have a heading that points to next waypoint
+        
+        if alpha < -3.1415: alpha += 6.283 #error containing (angular error is circular)
+        if eta < -3.1415: eta += 6.283
+        
+        #Feedback Controller (coefficients from trial/error)
+        dX = 2*rho
+        dTheta = 10*alpha
+        
+        #Inverse Kinematics Equations (vL and vR as a function dX and dTheta)
+        #Note that vL and vR in code is phi_l and phi_r on the slides/lecture
+        vL = dX - (dTheta/2) # Left wheel velocity in rad/s
+        vR = dX + (dTheta/2) # Right wheel velocity in rad/s
+        
+        #Proportional velocities/Clamp wheel speeds
+        if min(abs(vL),abs(vR)) == abs(vL):
+            vL = cmp(vR,0)*(vL/vR)*MAX_SPEED # sign preservation with cmp(vR,0)
+            vR = cmp(vR,0)*MAX_SPEED
+        else:
+            vR = cmp(vR,0)*(vR/vL)*MAX_SPEED
+            vL = cmp(vR,0)*MAX_SPEED
+        
+        #Bound pose_theta between [-pi, 2pi+pi/2]
+        #Important to not allow big fluctuations between timesteps (e.g., going from -pi to pi)
+        if pose_theta > 6.28+3.14/2: pose_theta -= 6.28
+        if pose_theta < -3.14: pose_theta += 6.28
+
+        #Stopping (goal reached) criteria -> waypoint progression
+        if rho <= 1 and eta <= 0.75: # was 0.05 and 0.524 in lab 3, but Tiago is clumsier and less precise
+            stop_and_wait(2)
+            current_goal += 1
+            next_goal += 1
+            if next_goal >= PLANNING_WAYPOINTS_SIZE: # to not go out of bounds
+                next_goal = current_goal
+            if current_goal >= PLANNING_WAYPOINTS_SIZE: # reached last checkpoint
+                completed = True
+                robot_parts[MOTOR_LEFT].setVelocity(0)
+                robot_parts[MOTOR_RIGHT].setVelocity(0)
+                continue
+    # end shopping block ---------------------------------------------------------------------------
+    
     # begin mapping block ---------------------------------------------------------------------------
     if mode == 'mapping':
+        
+        # storing cube positions
+        objects = camera.getRecognitionObjects()
+        for obj in objects: # look through all recognized objects
+            if obj.getColors() == [1.0, 1.0, 0.0] or obj.getColors() == [0.0, 1.0, 0.0]: # only yellow/green cubes
+                if not any(id == obj.getId() for id in cube_ids): # haven't stored cube before
+                    cube_ids.append(obj.getId()) # store ID
+                    
+                    # convert from camera frame to world frame (same math as LIDAR)
+                    obj_x = math.cos(pose_theta)*obj.getPosition()[0] - math.sin(pose_theta)*obj.getPosition()[1] + pose_x
+                    obj_y =  math.sin(pose_theta)*obj.getPosition()[0] + math.cos(pose_theta)*obj.getPosition()[1] + pose_y + CAM_OFFSET_Y
+                    obj_z = CAM_OFFSET_Z + obj.getPosition()[2]
+                    
+                    cube_positions.append([obj_x, obj_y, obj_z]) # store position in world frame
+                    
+                    if obj_y > 3.9:
+                        obj_y = AISLE_ONE
+                    elif obj_y > 0 and obj_y < 3.9:
+                        obj_y = AISLE_TWO
+                    elif obj_y < 0 and obj_y > -3.9:
+                        obj_y = AISLE_TWO
+                    elif obj_y < -3.9:
+                        obj_y = AISLE_TWO
+                    else:
+                        print("Invalid y-coordinate for object, cannot create valid path")
+                        
+                    cube_pos_valid.append([obj_x, obj_y, obj_z]) # store valid positions for path planning
+                    
+        print(len(cube_pos_valid))
         
         lidar_sensor_readings = lidar.getRangeImage()
         lidar_sensor_readings = lidar_sensor_readings[83:len(lidar_sensor_readings)-83]
@@ -274,6 +387,7 @@ while robot.step(timestep) != -1:
             rx = math.cos(alpha)*rho
             ry = -math.sin(alpha)*rho
             t = pose_theta
+           
             # Convert detection from robot coordinates into world coordinates
             wx =  math.cos(t)*rx - math.sin(t)*ry + pose_x
             wy =  math.sin(t)*rx + math.cos(t)*ry + pose_y
@@ -304,16 +418,16 @@ while robot.step(timestep) != -1:
         
         # Collision detection/avoidance            
         if any(val < LID_COL_THRESH for val in lidar_sensor_readings[125:150]):
-            rand_explore_left() # left sensors triggered
+            avoid_left() # left sensors triggered
         if any(val < LID_COL_THRESH for val in lidar_sensor_readings[350:375]):
-            rand_explore_right() # right sensors triggered
+            avoid_right() # right sensors triggered
         if any(val < LID_COL_THRESH_FRONT for val in lidar_sensor_readings[245:255]):
-            rand_explore_front() # front sensors triggered
+            rand_explore() # front sensors triggered
         else:
             vL = MAX_SPEED
             vR = MAX_SPEED
                 
-        # Manually store map file
+        # Manually store map file and located cube objects
         key = keyboard.getKey()
         while(keyboard.getKey() != -1): pass
         if key == ord('S'):
@@ -321,8 +435,13 @@ while robot.step(timestep) != -1:
             map = np.multiply(map,1)
             np.save('map.npy',map)
             print("Map file saved")
+        elif key == ord('P'):
+            np.save('cube_positions.npy', cube_positions)
+            np.save('cube_pos_valid.npy', cube_pos_valid)
+            print("Positions (true and modified/valid) saved")
     # end mapping block ------------------------------------------------------------------------------------
     
+    # set wheel velocities
     robot_parts["wheel_left_joint"].setVelocity(vL)
     robot_parts["wheel_right_joint"].setVelocity(vR)
     
