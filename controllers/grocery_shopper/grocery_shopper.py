@@ -31,8 +31,8 @@ CAM_OFFSET_Y = 0.23 # cam y-coord relative to robot
 CAM_OFFSET_Z = 1.05 # cam z-coord relative to robot
 # valid y-coords for path planning
 AISLE_ONE = 5.7
-AISLE_TWO = 2
-AISLE_THREE = -2
+AISLE_TWO = 2.0
+AISLE_THREE = -2.0
 AISLE_FOUR = -5.7
 
 # create the Robot instance.
@@ -132,7 +132,7 @@ def rand_explore():
     else:
         robot_parts["wheel_left_joint"].setVelocity(-0.7*MAX_SPEED)
         robot_parts["wheel_right_joint"].setVelocity(0.7*MAX_SPEED)
-    sleep(random.random()/1.5) # spin between 0-0.5 sec
+    sleep(random.random()/1.5) # spin between 0-0.666 sec
     
 def avoid_right():
     # veer left briefly
@@ -147,7 +147,7 @@ def avoid_left():
     sleep(.08)
     
 def cmp(a, b): # not sure why this function was removed from Python 3
-    return (a > b) - (a < b)  
+    return (a > b) - (a < b)
                 
 # State/Global Vars --------------------------------------------------------------------
 
@@ -158,8 +158,9 @@ cube_ids = []
 cube_positions = []
 cube_pos_valid = []
 
-planning_waypoints = [[-6,-5.7], [12.5,-5.7], [12.5,-2], [-6,-2], [-6,2], [12.5,2], [12.5,5.7], [-6,5.7]]
-PLANNING_WAYPOINTS_SIZE = 8 # used to keep track of state
+# planning_waypoints = [[-6,-5.7], [12.5,-5.7], [12.5,-2], [-6,-2], [-6,2], [12.5,2], [12.5,5.7], [-6,5.7]]
+# PLANNING_WAYPOINTS_SIZE = 8 # used to keep track of state
+complete_path = []
 
 # state init (to index into waypoint array)
 current_goal = 0
@@ -174,19 +175,25 @@ mode = 'planner'
 # begin planning block ---------------------------------------------------------------------------
 if mode == 'planner':
     # start/end points in world coordinate frame
-    start_w = (-5.0, 0.0) # (Pose_X, Pose_Y) in meters
-    end_w = (-12, 5) # (Pose_X, Pose_Y) in meters
-    # start/end in map coordinate frame
-    start = (180-int(start_w[0]*12), 96-int(start_w[1]*12)) # (x, y) in 360x192 map
-    end = (180-int(end_w[0]*12), 96-int(end_w[1]*12)) # (x, y) in 360x192 map
-    # cube_locations_w = np.load("cube_pos_valid") # a list of "end points" to retrieve cubes from
-    
+    cube_locations_w = np.load("cube_pos_valid.npy") # a list of "end points" to retrieve cubes from 
+    start_w = [[-5.0, 0.0]] # (Pose_X, Pose_Y) in meters 
+    for point in cube_locations_w:
+        start_w.append(point)
+    start_w.pop()
+       
     # start/end points in map coordinate frame
-    # start = (180-int(start_w[0]*12), 96-int(start_w[1]*12)) # (x, y) in 360x192 map
-    # cube_locations = []
-    # for point in cube_locations_w
-        # cube_locations.append = (180-int(point[0]*12), 96-int(point[1]*12)) # (x, y) in 360x192 map
+    start = []
+    cube_locations = []
     
+    for point in start_w:
+        start.append((180-int(point[0]*12), 96-int(point[1]*12))) # (x, y) in 360x192 map
+    for point in cube_locations_w:
+        cube_locations.append((180-int(point[0]*12), 96-int(point[1]*12))) # (x, y) in 360x192 map
+        
+    for i in range(len(cube_locations)): # path printed in green
+        display.setColor(int(0x00FF00))
+        display.drawPixel(cube_locations[i][1], cube_locations[i][0])
+        
     # This is an A* algorithm adapted from Wikipedia using Euclidian instead of Manhattan Distance
     def heuristic(a, b):
         '''
@@ -236,26 +243,28 @@ if mode == 'planner':
 
     # Load map from disk and visualize it
     map = np.load("map.npy")
-    plt.imshow(map)
-    plt.show()
+    # plt.imshow(map)
+    # plt.show()
     
     # Compute an approximation of the “configuration space”
     test = np.ones((12, 12))
     c_space = convolve2d(map, test, mode="same")
     c_space[c_space > 1] = 1
-    plt.imshow(c_space)
-    plt.show()
+    # plt.imshow(c_space)
+    # plt.show()
     
     # Call path_planner
-    path = path_planner(c_space, start, end)
+    # path = path_planner(c_space, start, end)
+    for i in range(len(cube_locations)):
+        complete_path.extend(path_planner(c_space, start[i], cube_locations[i])) # concatenate paths
     
     # Turn paths into waypoints and save on disk as path.npy and visualize it
     waypoints = []
-    for point in path:
+    # for point in path:
+    for point in complete_path:
         x = -(point[0]-180)/12
         y = -(point[1]-96)/12
         waypoints.append((x,y))
-    # print(waypoints)
     np.save('path.npy', waypoints)
     
     # Save map/c-space with path overlay
@@ -274,7 +283,7 @@ if mode == 'planner':
     plt.show()
     plt.imshow(map_with_path)
     plt.show()
-    print("===> Path Planning Phase Exited.")
+    print("===> Path Planning Phase Exited.")   
 # end planning block ---------------------------------------------------------------------------
 
 # Main Loop ---------------------------------------------------------------------------------------
@@ -360,20 +369,21 @@ while robot.step(timestep) != -1:
                     
                     cube_positions.append([obj_x, obj_y, obj_z]) # store position in world frame
                     
+                    # aisle thresholds determined by finding y-value of middle of each shelf
                     if obj_y > 3.9:
                         obj_y = AISLE_ONE
                     elif obj_y > 0 and obj_y < 3.9:
                         obj_y = AISLE_TWO
-                    elif obj_y < 0 and obj_y > -3.9:
-                        obj_y = AISLE_TWO
-                    elif obj_y < -3.9:
-                        obj_y = AISLE_TWO
+                    elif obj_y < 0 and obj_y > -3.8:
+                        obj_y = AISLE_THREE
+                    elif obj_y < -3.5: # for some reason that one block needs a more aggressive threshold
+                        obj_y = AISLE_FOUR
                     else:
-                        print("Invalid y-coordinate for object, cannot create valid path")
+                        print("Invalid y-coordinate for object, could not create valid path")
                         
                     cube_pos_valid.append([obj_x, obj_y, obj_z]) # store valid positions for path planning
-                    
-        print(len(cube_pos_valid))
+                    print("Cube Found! Current Total: ", len(cube_pos_valid)) # stop mapping at 12 cubes (10 yellow, 2, green)
+                    # print("Cube Positions: ", cube_positions)
         
         lidar_sensor_readings = lidar.getRangeImage()
         lidar_sensor_readings = lidar_sensor_readings[83:len(lidar_sensor_readings)-83]
@@ -440,7 +450,7 @@ while robot.step(timestep) != -1:
             np.save('cube_pos_valid.npy', cube_pos_valid)
             print("Positions (true and modified/valid) saved")
     # end mapping block ------------------------------------------------------------------------------------
-    
+
     # set wheel velocities
     robot_parts["wheel_left_joint"].setVelocity(vL)
     robot_parts["wheel_right_joint"].setVelocity(vR)
