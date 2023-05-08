@@ -1,6 +1,6 @@
 """grocery_shopper.py"""
 
-from controller import Robot, Motor, Camera, CameraRecognitionObject, RangeFinder, Lidar, Keyboard
+from controller import Robot, Motor, Camera, CameraRecognitionObject, RangeFinder, Lidar, Keyboard, PositionSensor
 import math
 import random
 import numpy as np
@@ -8,6 +8,14 @@ from matplotlib import pyplot as plt
 from scipy.signal import convolve2d # for mapping, path planning
 import heapq # for path planning
 import cv2 # for computer vision
+
+#all for arm manipulation
+import ikpy.chain
+import ikpy.utils.plot as plot_utils
+#my_chain = ikpy.chain.Chain.from_urdf_file("TiagoSteel-Copy2.urdf")
+my_chain1 = ikpy.chain.Chain.from_urdf_file("robot_urdf.urdf", base_elements=["torso_lift_link", "torso_lift_link_TIAGo front arm_11367_joint"], active_links_mask=[False, False, True, True, True, True, True, True, True, False, False, True])
+#print("===Printing Chain===")
+#print(my_chain1)
 
 # Initialization
 print("===> Initializing Boulder Dynamics' Grocery Shopper...")
@@ -62,6 +70,32 @@ left_gripper_enc=robot.getDevice("gripper_left_finger_joint_sensor")
 right_gripper_enc=robot.getDevice("gripper_right_finger_joint_sensor")
 left_gripper_enc.enable(timestep)
 right_gripper_enc.enable(timestep)
+
+#Enable Robot arm
+torso_lift_joint = robot.getDevice('torso_lift_joint')
+arm_1_joint = robot.getDevice('arm_1_joint')
+arm_2_joint = robot.getDevice('arm_2_joint')
+arm_3_joint = robot.getDevice('arm_3_joint')
+arm_4_joint = robot.getDevice('arm_4_joint')
+arm_5_joint = robot.getDevice('arm_5_joint')
+arm_6_joint = robot.getDevice('arm_6_joint')
+arm_7_joint = robot.getDevice('arm_7_joint')
+
+#Enable Sensors for arm
+arm_1_joint_sensor = robot.getDevice('arm_1_joint_sensor')
+arm_2_joint_sensor = robot.getDevice('arm_2_joint_sensor')
+arm_3_joint_sensor = robot.getDevice('arm_3_joint_sensor')
+arm_4_joint_sensor = robot.getDevice('arm_4_joint_sensor')
+arm_5_joint_sensor = robot.getDevice('arm_5_joint_sensor')
+arm_6_joint_sensor = robot.getDevice('arm_6_joint_sensor')
+arm_7_joint_sensor = robot.getDevice('arm_7_joint_sensor')
+arm_1_joint_sensor.enable(timestep)
+arm_2_joint_sensor.enable(timestep)
+arm_3_joint_sensor.enable(timestep) 
+arm_4_joint_sensor.enable(timestep)
+arm_5_joint_sensor.enable(timestep)
+arm_6_joint_sensor.enable(timestep)
+arm_7_joint_sensor.enable(timestep)
 
 # Enable Camera
 camera = robot.getDevice('camera')
@@ -165,7 +199,7 @@ def sort_x(points):
                 
 # State/Global Vars --------------------------------------------------------------------
 
-gripper_status="closed"
+#gripper_status="closed"
 map = np.zeros(shape=[360,192]) # room is 30x16 -> 30*12=360, 16*12=192
 
 # for storing cube positions
@@ -184,9 +218,10 @@ complete_path = []
 
 # ------------------------ SELECT CONTROLLER MODE HERE! ---------------------------
 
-mode = 'mapping'
-# mode = 'planner'
-# mode = 'shopping'
+mode = 'mapping'          # autonomously map environment and store cube positions
+# mode = 'planner'          # create path from items found in mapping
+# mode = 'shopping'         # follow path from planner via IK
+# mode = 'manipulation'     # arm movement to pick up blocks
 
 # begin planning block ---------------------------------------------------------------------------
 if mode == 'planner':
@@ -233,8 +268,8 @@ if mode == 'planner':
         cost = {start:0}
         came_from = {}
         
-        while heap:
-            curr_cost, current = heapq.heappop(heap)
+        while heap: # while the heap is not empty
+            _, current = heapq.heappop(heap)
 
             if current == end:
                 path = [current]
@@ -259,24 +294,22 @@ if mode == 'planner':
 
     # Load map from disk and visualize it
     map = np.load("map.npy")
-    # plt.imshow(map)
-    # plt.show()
+    plt.imshow(map)
+    plt.show()
     
     # Compute an approximation of the “configuration space”
     test = np.ones((27, 27)) # upping the size of this creates more padding, useful for Tiago
     c_space = convolve2d(map, test, mode="same")
     c_space[c_space > 1] = 1
-    # plt.imshow(c_space)
-    # plt.show()
+    plt.imshow(c_space)
+    plt.show()
     
     # Call path_planner
-    # path = path_planner(c_space, start, end)
     for i in range(len(cube_locations)):
         complete_path.extend(path_planner(c_space, start[i], cube_locations[i])) # concatenate paths
     
-    # Turn paths into waypoints and save on disk as path.npy and visualize it
+    # Turn path into set of waypoints and save on disk for shopping module
     waypoints = []
-    # for point in path:
     for point in complete_path:
         x = -(point[0]-180)/12
         y = -(point[1]-96)/12
@@ -358,8 +391,8 @@ while robot.step(timestep) != -1:
         if eta < -3.1415: eta += 6.283
         
         #Feedback Controller (coefficients from trial/error)
-        dX = rho
-        dTheta = 5*alpha
+        dX = rho # no need to change
+        dTheta = 5*alpha # found robot was not rotating quickly enough - setting too high creates wobble
         
         #Inverse Kinematics Equations (vL and vR as a function dX and dTheta)
         #Note that vL and vR in code is phi_l and phi_r on the slides/lecture
@@ -385,7 +418,8 @@ while robot.step(timestep) != -1:
             # a routine that stops the robot to shop, including performing the arm manipulation
             # required to move a block from the shelf into the basket would go here. Ideally,
             # a comparison would be made to determine if our current waypoint matches one of the
-            # valid block positions found in mapping.
+            # valid block positions found in mapping. However, we couldn't manage to integrate these
+            # features, so they are just seperate blocks in the controller
             # --------------------------
             current_goal += 1
             next_goal += 1
@@ -497,16 +531,112 @@ while robot.step(timestep) != -1:
         # Manually store map file and located cube objects
         key = keyboard.getKey()
         while(keyboard.getKey() != -1): pass
-        if key == ord('S'):
+        if key == ord('S'): # press 'S' to save map file to directory
             map = map > .5
             map = np.multiply(map,1)
             np.save('map.npy',map)
             print("Map file saved")
-        elif key == ord('P'):
+        elif key == ord('P'): # press 'P' to save cube positions files to directory
             np.save('cube_positions.npy', cube_positions)
             np.save('cube_pos_valid.npy', cube_pos_valid)
             print("Positions (true and modified/valid) saved")
     # end mapping block ------------------------------------------------------------------------------------
+    
+    # begin manipulation block -----------------------------------------------------------------------------
+      # to use the arm to pick up blocks you must use the arrow keys to position the robot to where the cube is inbetween the grippers.
+      # once cube is in the grippers press 'CONTROL + C' to close grippers, then press either 'CONTROL + N' or 'CONTROL + Y' depending on
+      # which shelf you got the cube from
+      # if cube from the middle shelf use 'CONTROL + N', OR 'CONTROL + B'
+      # if the cube was on the top shelf, use 'CONTROL + Y'.
+      # when arm is positioned above basket use 'CONTROL + O' to open the grippers and drop cube into basket
+    if mode == 'manipulation':
+        key = keyboard.getKey()
+        while(keyboard.getKey() != -1): pass
+       
+        # --- BLOCKS MIDDLE SHELF --- #    
+        if key==Keyboard.CONTROL+ord('M'):
+        #BLOCKS ON MIDDLE SHELF
+            torso_lift_joint.setPosition(0)
+            arm_1_joint.setPosition(0.07)
+            arm_2_joint.setPosition(0.04)
+            arm_3_joint.setPosition(-1.4)
+            arm_4_joint.setPosition(1.4)
+            arm_5_joint.setPosition(1.98)
+            arm_6_joint.setPosition(-0.2)
+            arm_7_joint.setPosition(-1.92)
+            pass
+        elif key==Keyboard.CONTROL+ord('N'):
+        #BLOCKS ON MIDDLE SHELF TO BASKET / CAN ALSO USE 'B' for block on middle shelf
+            torso_lift_joint.setPosition(0)
+            arm_4_joint.setPosition(2.1)
+            arm_5_joint.setPosition(1.5)
+            arm_6_joint.setPosition(-1.34)
+            pass
+            
+        # --- BLOCKS TOP SHELF --- #    
+        elif key==Keyboard.CONTROL+ord('T'):
+        #BLOCKS ON TOP SHELF
+            torso_lift_joint.setPosition(0.35)
+            arm_1_joint.setPosition(0.07)
+            arm_2_joint.setPosition(0.04)
+            arm_3_joint.setPosition(-1.8)
+            arm_4_joint.setPosition(1.4)
+            arm_5_joint.setPosition(-0.1)
+            arm_6_joint.setPosition(-0.3)
+            arm_7_joint.setPosition(0.1)
+            pass
+        elif key==Keyboard.CONTROL+ord('Y'):
+        #BLOCKS ON TOP SHELF TO BASKET
+            torso_lift_joint.setPosition(0.2)
+            arm_4_joint.setPosition(2.15)
+            arm_5_joint.setPosition(-1.9)
+            arm_6_joint.setPosition(1.39)
+            arm_7_joint.setPosition(-1.5)
+            pass
+            
+        # --- GRIPPERS --- #
+        elif key==Keyboard.CONTROL+ord('C'):
+            # Close gripper, note that this takes multiple time steps...
+            robot_parts["gripper_left_finger_joint"].setPosition(0)
+            robot_parts["gripper_right_finger_joint"].setPosition(0)
+            pass
+        elif key==Keyboard.CONTROL+ord('O'):
+            # open gripper
+            robot_parts["gripper_left_finger_joint"].setPosition(0.045)
+            robot_parts["gripper_right_finger_joint"].setPosition(0.045)
+            pass
+            
+        elif key==Keyboard.CONTROL+ord('B'):
+        #position to get cubes in basket
+            arm_1_joint.setPosition(0.07)
+            arm_2_joint.setPosition(0.2)
+            arm_3_joint.setPosition(-1.5)
+            arm_4_joint.setPosition(2.29)
+            arm_5_joint.setPosition(-2.07)
+            arm_6_joint.setPosition(1.20)
+            arm_7_joint.setPosition(-1.30)
+            #current_joint_positions = np.zeros(12) \\ik stuff
+            #joint_positions = my_chain1.forward_kinematics(current_joint_positions)
+            #print(joint_positions)
+            pass
+            
+        # ----- MOVE ROBOT MANUALLY ----- #
+        elif key == keyboard.LEFT :
+            vL = -MAX_SPEED*0.6
+            vR = MAX_SPEED*0.6
+        elif key == keyboard.RIGHT:
+            vL = MAX_SPEED*0.6
+            vR = -MAX_SPEED*0.6
+        elif key == keyboard.UP:
+            vL = MAX_SPEED*0.6
+            vR = MAX_SPEED*0.6
+        elif key == keyboard.DOWN:
+            vL = -MAX_SPEED*0.6
+            vR = -MAX_SPEED*0.6
+        elif key == ord(' '): #to stop robot. very useful in positioning robot so pls use!!
+            vL = 0
+            vR = 0
+    # end manipulation block -------------------------------------------------------------------------------
 
     # set wheel velocities
     if mode == 'shopping': # reduces wobble significantly, helps IK
@@ -516,15 +646,3 @@ while robot.step(timestep) != -1:
     robot_parts["wheel_left_joint"].setVelocity(vL)
     robot_parts["wheel_right_joint"].setVelocity(vR)
     
-    if(gripper_status=="open"):
-        # Close gripper, note that this takes multiple time steps...
-        robot_parts["gripper_left_finger_joint"].setPosition(0)
-        robot_parts["gripper_right_finger_joint"].setPosition(0)
-        if right_gripper_enc.getValue()<=0.005:
-            gripper_status="closed"
-    else:
-        # Open gripper
-        robot_parts["gripper_left_finger_joint"].setPosition(0.045)
-        robot_parts["gripper_right_finger_joint"].setPosition(0.045)
-        if left_gripper_enc.getValue()>=0.044:
-            gripper_status="open"
